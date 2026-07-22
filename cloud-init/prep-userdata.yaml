@@ -1,0 +1,38 @@
+#cloud-config
+# One-time first-boot prep for the GOLDEN TEMPLATE only.
+# It runs once when build-template.sh powers the imported OVA on, then the VM
+# powers itself off so we can convert it to a vCenter template.
+#
+# What it does:
+#   - Enables cloud-init's VMware datasource so future clones read guestinfo.*
+#   - Installs guest tooling
+#   - Generalizes the image (clears machine-id + SSH host keys) so every clone
+#     gets a unique identity
+#   - Wipes cloud-init state so the NEXT boot (a fresh clone) runs from scratch
+
+package_update: true
+package_upgrade: false
+packages:
+  - open-vm-tools
+  - cloud-init
+
+write_files:
+  - path: /etc/cloud/cloud.cfg.d/99-vmware-datasource.cfg
+    permissions: '0644'
+    content: |
+      # Force cloud-init to prefer the VMware (guestinfo) datasource on vSphere.
+      datasource_list: [ VMware, OVF, NoCloud, None ]
+      datasource:
+        VMware:
+          allow_raw_data: true
+
+runcmd:
+  # Generalize identity so clones don't collide.
+  - rm -f /etc/ssh/ssh_host_*
+  - truncate -s 0 /etc/machine-id
+  - rm -f /var/lib/dbus/machine-id
+  - ln -sf /etc/machine-id /var/lib/dbus/machine-id
+  # Wipe cloud-init state so the clone's guestinfo is treated as a new instance.
+  - cloud-init clean --logs --seed
+  # Power off; build-template.sh waits for this, then marks the VM as a template.
+  - shutdown -h now

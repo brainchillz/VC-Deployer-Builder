@@ -1,0 +1,11 @@
+# Large downloaded / build image artifacts — re-fetched by build-template.sh
+*.ova
+*.qcow2
+*.vmdk
+*.iso
+*.img
+
+# Secrets / instance config (keep real values in your private infra repo)
+config.env
+
+*.log
