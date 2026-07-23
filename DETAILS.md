@@ -53,7 +53,7 @@ them so you don't repeat `-u`, `-dc`, `-ds`, etc. on every call):
 ```bash
 export GOVC_URL="https://vcenter.example.com"          # vCenter endpoint
 export GOVC_USERNAME="administrator@vsphere.local"
-export GOVC_PASSWORD="********"                   # taken from ../vcenter
+export GOVC_PASSWORD="********"                   # your vCenter admin password
 export GOVC_INSECURE="1"                          # accept the self-signed TLS cert
 export GOVC_DATACENTER="Datacenter"               # which DC inventory to act in
 export GOVC_DATASTORE="datastore1"           # where VM disks land
