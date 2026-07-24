@@ -51,10 +51,31 @@ profile. OS specifics live in `profiles/*.env`.
 | `ubuntu-2604` (default) | Ubuntu 26.04 LTS | OVA | trivial import |
 | `ubuntu-2404` | Ubuntu 24.04 LTS | OVA | trivial import |
 | `rocky-10` | Rocky Linux 10 | qcow2 | qcow2→VMDK convert; seed-ISO prep |
+| `windows-2025` | Windows Server 2025 (eval) | VHDX | see below — needs root + `qemu-nbd` + ntfs3 |
 
 Add an OS by copying a `profiles/*.env` and running `./build-template.sh <name>`.
 Each profile sets the template name, image URL/format, login user, admin group,
 ssh unit, and NIC name (plus, for qcow2, guest id / firmware / disk controller).
+
+### Windows (yes, really)
+
+`windows-2025` builds a template from Microsoft's **evaluation VHDX** (no
+installer pass). The flow: inject an OOBE answer file + prep script directly
+into the image's NTFS (`qemu-nbd` + the kernel `ntfs3` driver — hence root, and
+a Linux build host), convert/import like the qcow2 path, then boot once: OOBE
+completes unattended and the prep script installs **VMware Tools**, the
+**OpenSSH Server** capability, and **Cloudbase-Init** configured for the
+**VMware guestinfo datasource** — so Windows clones consume the *same*
+`guestinfo.*` transport the Linux templates use with cloud-init — and ends with
+`sysprep /generalize`. Hardware is EFI + `lsilogic-sas` + `e1000e` (the eval
+image is Generation 2, and everything must boot on in-box drivers).
+
+Hard-won notes, so nobody relearns them: the answer file **must** be injected at
+`C:\Windows\Panther\unattend.xml` (a seed-ISO copy is not reliably consumed at
+the OOBE stage of a pre-installed image), it must **not** contain a `specialize`
+pass (a `ComputerName` there loops the setup engine — clones are named by
+Cloudbase-Init anyway), and the licensing is Microsoft's 180-day eval.
+Deploy-side, Windows is **DHCP-only** for now.
 
 ## More
 

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  One-time OOBE answer file for the GOLDEN TEMPLATE prep boot only.
+  build-template.sh injects this INTO the image at C:\Windows\Panther\unattend.xml
+  (via qemu-nbd + ntfs3) — the implicit search location OOBE is guaranteed to
+  honor. (A seed-ISO copy is NOT reliably consumed at the OOBE stage of a
+  pre-installed image — verified live on Server 2025.) OOBE then completes
+  unattended and runs the injected C:\Windows\Setup\Scripts\prep.ps1 once at
+  first logon, which ends with `sysprep /generalize` — wiping everything this
+  file set (accounts, autologon, machine identity) before the VM ever becomes
+  a template. @PREP_ADMIN_PASSWORD@ is substituted by build-template.sh.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <!-- NO specialize section: a ComputerName rename there sends the eval
+       image's setup engine into a reboot-and-recall loop (verified in
+       setupact.log). The prep hostname is irrelevant — Cloudbase-Init names
+       every clone at deploy time. oobeSystem only. -->
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+        <SkipMachineOOBE>true</SkipMachineOOBE>
+        <SkipUserOOBE>true</SkipUserOOBE>
+      </OOBE>
+      <UserAccounts>
+        <AdministratorPassword>
+          <Value>@PREP_ADMIN_PASSWORD@</Value>
+          <PlainText>true</PlainText>
+        </AdministratorPassword>
+      </UserAccounts>
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <Username>Administrator</Username>
+        <LogonCount>1</LogonCount>
+        <Password>
+          <Value>@PREP_ADMIN_PASSWORD@</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Template prep (VMware Tools + Cloudbase-Init + sysprep)</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\prep.ps1</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+  </settings>
+</unattend>

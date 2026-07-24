@@ -4,8 +4,11 @@
 *.vmdk
 *.iso
 *.img
+*.vhd
+*.vhdx
 
 # Secrets / instance config (keep real values in your private infra repo)
 config.env
 
 *.log
+.*.injected

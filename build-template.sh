@@ -32,7 +32,9 @@ require govc; require gzip; require base64; require curl
 : "${TEMPLATE_CPUS:=2}"
 : "${TEMPLATE_MEMORY_MB:=2048}"
 : "${TEMPLATE_DISK_GB:=}"
-IMAGE_PATH="$SCRIPT_DIR/$(basename "$IMAGE_URL")"
+# IMAGE_FILE overrides the local filename (needed when IMAGE_URL is a redirect
+# link with no usable basename, e.g. Microsoft fwlink).
+IMAGE_PATH="$SCRIPT_DIR/${IMAGE_FILE:-$(basename "$IMAGE_URL")}"
 
 log "Profile '$PROFILE' -> template '$TEMPLATE_NAME' (format: $IMAGE_FORMAT)"
 log "Checking vCenter connectivity"
@@ -50,14 +52,16 @@ download_image() {
   fi
 }
 
-# Wait until the VM powers itself off (the prep cloud-init ends with 'shutdown').
+# Wait until the VM powers itself off (the prep ends with a shutdown).
+# Optional arg: max seconds to wait (default 600; Windows prep needs much more).
 wait_for_poweroff() {
-  log "Waiting for prep to finish (VM powers itself off; up to ~10 min)..."
-  for _ in $(seq 1 120); do
+  local max="${1:-600}"
+  log "Waiting for prep to finish (VM powers itself off; up to ~$((max / 60)) min)..."
+  for _ in $(seq 1 $((max / 5))); do
     [ "$(vm_power_state "$TEMPLATE_NAME")" = "poweredOff" ] && return 0
     sleep 5
   done
-  die "VM did not power off in time. Inspect the console; prep cloud-init may have failed."
+  die "VM did not power off in time. Inspect the console; the prep may have failed."
 }
 
 # ---------------------------------------------------------------------------
@@ -97,7 +101,7 @@ build_from_ova() {
 # Path B: qcow2 image (Rocky) — convert, upload, build VM shell, prep via seed ISO.
 # ---------------------------------------------------------------------------
 build_from_qcow2() {
-  require qemu-img; require hdiutil
+  require qemu-img
   : "${GUEST_ID:?profile must set GUEST_ID}"; : "${FIRMWARE:?profile must set FIRMWARE}"
   : "${DISK_CONTROLLER:?profile must set DISK_CONTROLLER}"
   download_image
@@ -128,9 +132,7 @@ build_from_qcow2() {
   local seed_dir seed_iso; seed_dir="$(mktemp -d)"; seed_iso="$SCRIPT_DIR/${TEMPLATE_NAME}-seed.iso"
   printf 'instance-id: prep-%s\nlocal-hostname: %s\n' "$TEMPLATE_NAME" "$TEMPLATE_NAME" > "$seed_dir/meta-data"
   cp "$SCRIPT_DIR/cloud-init/prep-userdata.yaml" "$seed_dir/user-data"
-  rm -f "$seed_iso"
-  hdiutil makehybrid -iso -joliet -default-volume-name CIDATA -o "$seed_iso" "$seed_dir" >/dev/null
-  [ -f "$seed_iso" ] || seed_iso="${seed_iso}.cdr"   # hdiutil sometimes appends .cdr
+  make_iso "$seed_dir" "$seed_iso" CIDATA
   rm -rf "$seed_dir"
 
   log "Uploading + attaching seed ISO"
@@ -150,9 +152,95 @@ build_from_qcow2() {
   govc datastore.rm -f "$TEMPLATE_NAME/seed.iso" >/dev/null 2>&1 || true
 }
 
+# ---------------------------------------------------------------------------
+# Path C: Windows eval VHD/VHDX — inject prep into the image, convert, upload,
+# build VM shell, boot once (OOBE answers + first-logon prep.ps1 that installs
+# VMware Tools + Cloudbase-Init, then sysprep /generalize /shutdown).
+#
+# The answer file is injected INTO the image at C:\Windows\Panther\unattend.xml
+# via qemu-nbd + the kernel ntfs3 driver (needs root, Linux). A seed-ISO copy
+# is NOT reliably consumed at the OOBE stage of a pre-installed image —
+# verified live on Server 2025.
+# ---------------------------------------------------------------------------
+inject_windows_prep() {
+  require qemu-nbd; require partprobe
+  [ "$(id -u)" = 0 ] || die "Windows builds need root (qemu-nbd + ntfs3 mount)."
+  local marker="$SCRIPT_DIR/.$(basename "$IMAGE_PATH").injected"
+  if [ -f "$marker" ]; then
+    log "Prep already injected into $(basename "$IMAGE_PATH") (rm '$marker' to redo)"
+    return 0
+  fi
+  log "Injecting unattend answers + prep script into the image (Windows\\Panther)"
+  modprobe nbd max_part=16
+  qemu-nbd --connect=/dev/nbd0 "$IMAGE_PATH"
+  # nbd needs a beat before partitions appear
+  sleep 2; partprobe /dev/nbd0 2>/dev/null || true; sleep 1
+  local win_part="/dev/nbd0p${WINDOWS_PARTITION:-3}"
+  [ -b "$win_part" ] || { qemu-nbd --disconnect /dev/nbd0 >/dev/null; die "Windows partition $win_part not found"; }
+  local mnt; mnt="$(mktemp -d)"
+  if ! mount -t ntfs3 "$win_part" "$mnt" 2>/dev/null; then
+    qemu-nbd --disconnect /dev/nbd0 >/dev/null
+    die "Could not mount $win_part with ntfs3 (kernel driver missing?)"
+  fi
+  mkdir -p "$mnt/Windows/Panther" "$mnt/Windows/Setup/Scripts"
+  sed -e "s|@PREP_ADMIN_PASSWORD@|$PREP_ADMIN_PASSWORD|g" \
+      "$SCRIPT_DIR/windows/autounattend.xml" > "$mnt/Windows/Panther/unattend.xml"
+  sed -e "s|@DEFAULT_USERNAME@|$DEFAULT_USERNAME|g" \
+      -e "s|@ADMIN_GROUP@|$ADMIN_GROUP|g" \
+      "$SCRIPT_DIR/windows/prep.ps1" > "$mnt/Windows/Setup/Scripts/prep.ps1"
+  umount "$mnt"; rmdir "$mnt"
+  qemu-nbd --disconnect /dev/nbd0 >/dev/null
+  touch "$marker"
+}
+
+build_from_vhd() {
+  require qemu-img; require sed
+  : "${GUEST_ID:?profile must set GUEST_ID}"; : "${FIRMWARE:?profile must set FIRMWARE}"
+  : "${DISK_CONTROLLER:?profile must set DISK_CONTROLLER}"
+  : "${PREP_ADMIN_PASSWORD:?profile must set PREP_ADMIN_PASSWORD}"
+  download_image
+
+  # 1. Inject the OOBE answers + prep script, then convert to streamOptimized
+  #    VMDK (qemu-img probes VHD vs VHDX on its own).
+  inject_windows_prep
+  local vmdk="$SCRIPT_DIR/${TEMPLATE_NAME}.vmdk"
+  if [ ! -f "$vmdk" ] || [ "$IMAGE_PATH" -nt "$vmdk" ]; then
+    log "Converting VHD -> VMDK (streamOptimized) with qemu-img"
+    qemu-img convert -O vmdk -o subformat=streamOptimized "$IMAGE_PATH" "$vmdk"
+  fi
+
+  # 2. Upload+convert the VMDK into the datastore.
+  log "Uploading VMDK into datastore folder '$TEMPLATE_NAME'"
+  govc datastore.rm -f "$TEMPLATE_NAME" >/dev/null 2>&1 || true
+  govc import.vmdk "$vmdk" "$TEMPLATE_NAME"
+  local ds_disk="$TEMPLATE_NAME/${TEMPLATE_NAME}.vmdk"
+
+  # 3. VM shell. Everything must work with Windows' IN-BOX drivers (no VMware
+  #    Tools yet): lsilogic-sas disk + e1000e NIC, per the profile.
+  log "Creating VM shell (guest=$GUEST_ID firmware=$FIRMWARE ctrl=$DISK_CONTROLLER net=${NET_ADAPTER:-vmxnet3})"
+  govc vm.create -on=false \
+    -g "$GUEST_ID" -c "$TEMPLATE_CPUS" -m "$TEMPLATE_MEMORY_MB" -firmware "$FIRMWARE" \
+    -net "$GOVC_NETWORK" -net.adapter "${NET_ADAPTER:-vmxnet3}" \
+    -disk "$ds_disk" -disk.controller "$DISK_CONTROLLER" -link=false \
+    "$TEMPLATE_NAME"
+  # Boot from the disk before PXE — otherwise a netboot server on the LAN
+  # (e.g. netboot.xyz) catches the fresh-NVRAM EFI boot and parks at its menu.
+  govc device.boot -vm "$TEMPLATE_NAME" -order disk,ethernet
+  [ -n "$TEMPLATE_DISK_GB" ] && govc vm.disk.change -vm "$TEMPLATE_NAME" -disk.label "Hard disk 1" -size "${TEMPLATE_DISK_GB}G"
+
+  # 4. Boot once: injected answers drive OOBE -> first logon -> prep.ps1 ->
+  #    sysprep /generalize /shutdown. Windows takes far longer than cloud-init.
+  #    (prep.ps1 deletes Panther\unattend.xml before sysprep so clones never
+  #    re-read the prep answers.)
+  log "Powering on for first-boot prep (OOBE + VMware Tools + Cloudbase-Init + sysprep)"
+  govc vm.power -on "$TEMPLATE_NAME"
+  wait_for_poweroff 3600
+}
+
 case "$IMAGE_FORMAT" in
-  ova)   build_from_ova ;;
-  qcow2) build_from_qcow2 ;;
+  ova)      build_from_ova ;;
+  qcow2)    build_from_qcow2 ;;
+  vhd|vhdx) build_from_vhd ;;
   *) die "Unknown IMAGE_FORMAT '$IMAGE_FORMAT' in profile" ;;
 esac
 
@@ -163,6 +251,7 @@ log "Stamping template annotation with profile metadata"
 govc vm.change -vm "$TEMPLATE_NAME" -annotation "managed-by=vmware-template-toolkit
 profile=$PROFILE
 os_id=$OS_ID
+os_family=${OS_FAMILY:-linux}
 default_username=$DEFAULT_USERNAME
 admin_group=$ADMIN_GROUP
 ssh_service=$SSH_SERVICE
