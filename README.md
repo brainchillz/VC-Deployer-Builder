@@ -50,6 +50,7 @@ profile. OS specifics live in `profiles/*.env`.
 |---|---|---|---|
 | `ubuntu-2604` (default) | Ubuntu 26.04 LTS | OVA | trivial import |
 | `ubuntu-2404` | Ubuntu 24.04 LTS | OVA | trivial import |
+| `rocky-9` | Rocky Linux 9 | qcow2 | qcow2→VMDK convert; seed-ISO prep |
 | `rocky-10` | Rocky Linux 10 | qcow2 | qcow2→VMDK convert; seed-ISO prep |
 | `windows-2025` | Windows Server 2025 (eval) | VHDX | see below — needs root + `qemu-nbd` + ntfs3 |
 
