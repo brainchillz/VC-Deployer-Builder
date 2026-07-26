@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 #
-# build-template.sh [PROFILE] — Build a reusable vCenter template for the given OS
+# build-template.sh [PROFILE] — Build a reusable template for the given OS
 # profile (default: ubuntu-2604). Profiles live in profiles/<name>.env.
+#
+# Works against vCenter OR a standalone ESXi host (auto-detected): on vCenter
+# the finished VM is converted to a template object; on ESXi (which has no
+# template type) it is left as a powered-off VM and stamped role=template.
 #
 #   ./build-template.sh ubuntu-2604
 #   ./build-template.sh ubuntu-2404
@@ -17,9 +21,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
-[ -f "$SCRIPT_DIR/config.env" ] || die "config.env not found. Run: cp config.env.example config.env  (then edit it)"
+# BUILDER_CONFIG overrides which config file is sourced — handy when the same
+# builder targets both a vCenter and a standalone ESXi host.
+CONFIG_FILE="${BUILDER_CONFIG:-$SCRIPT_DIR/config.env}"
+[ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE not found. Run: cp config.env.example config.env  (then edit it)"
 # shellcheck source=/dev/null
-source "$SCRIPT_DIR/config.env"
+source "$CONFIG_FILE"
 
 PROFILE="${1:-${DEFAULT_PROFILE:-ubuntu-2604}}"
 PROFILE_FILE="$SCRIPT_DIR/profiles/${PROFILE}.env"
@@ -37,8 +44,11 @@ require govc; require gzip; require base64; require curl
 IMAGE_PATH="$SCRIPT_DIR/${IMAGE_FILE:-$(basename "$IMAGE_URL")}"
 
 log "Profile '$PROFILE' -> template '$TEMPLATE_NAME' (format: $IMAGE_FORMAT)"
-log "Checking vCenter connectivity"
-govc about >/dev/null || die "Cannot reach vCenter. Check GOVC_URL / credentials in config.env."
+log "Checking vSphere connectivity"
+govc about >/dev/null || die "Cannot reach vCenter/ESXi. Check GOVC_URL / credentials in config.env."
+# "VirtualCenter" or "HostAgent" (standalone ESXi) — decides the templatize step.
+API_TYPE="$(govc about | awk -F': *' '/^API type/{print $2}')"
+log "Endpoint type: ${API_TYPE:-unknown}"
 if govc vm.info "$TEMPLATE_NAME" 2>/dev/null | grep -q "Name:"; then
   die "A VM/template named '$TEMPLATE_NAME' already exists. Delete it or change TEMPLATE_NAME in the profile."
 fi
@@ -249,6 +259,7 @@ esac
 # from the name. Parsed as key=value lines.
 log "Stamping template annotation with profile metadata"
 govc vm.change -vm "$TEMPLATE_NAME" -annotation "managed-by=vmware-template-toolkit
+role=template
 profile=$PROFILE
 os_id=$OS_ID
 os_family=${OS_FAMILY:-linux}
@@ -258,8 +269,14 @@ ssh_service=$SSH_SERVICE
 iface=$DEFAULT_IFACE
 built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-log "Converting '$TEMPLATE_NAME' to a vCenter template"
-govc vm.markastemplate "$TEMPLATE_NAME"
+if [ "$API_TYPE" = "HostAgent" ]; then
+  # Standalone ESXi has no template object type: the powered-off, annotated VM
+  # IS the template. Deployers copy its disk and never power it on.
+  log "Standalone ESXi host: leaving '$TEMPLATE_NAME' as a powered-off VM"
+else
+  log "Converting '$TEMPLATE_NAME' to a vCenter template"
+  govc vm.markastemplate "$TEMPLATE_NAME"
+fi
 
 log "Done. Template ready: $TEMPLATE_NAME"
 log "Deploy with: ./deploy-vm.sh --profile $PROFILE --name host01 --ip <IP> --gateway <GW> --cidr <N> --wait"
